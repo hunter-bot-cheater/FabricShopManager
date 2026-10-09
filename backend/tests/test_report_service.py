@@ -175,3 +175,40 @@ def test_inout_screen_and_export_share_legacy_history(tmp_path, monkeypatch):
     assert sheet["D4"].value == report["rows"][0]["出库米数"]
     assert sheet["D5"].value == report["rows"][0]["入库米数"]
     assert sheet["F4"].value == report["rows"][0]["期末库存"]
+
+
+def test_legacy_inout_outflow_matches_inventory_and_ignores_stale_daily_cache(monkeypatch):
+    from app.services.inventory_service import list_inventory
+
+    monkeypatch.setattr(report_service, "load_settings", lambda: {"inventory_sales_window_days": 7})
+    monkeypatch.setattr("app.services.inventory_service.load_settings", lambda: {
+        "inventory_sales_window_days": 7,
+    })
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(text("""CREATE TABLE app_products (
+            flower TEXT, cost_per_meter REAL, current_stock REAL, active INTEGER,
+            roll_length_meters REAL, replenishment_days INTEGER)"""))
+        connection.execute(text("""CREATE TABLE app_orders (
+            flower TEXT, legacy INTEGER, inventory_date DATE, baseline_stock_effect_meters REAL)"""))
+        connection.execute(text("CREATE TABLE app_meta (meta_key TEXT, meta_value TEXT)"))
+        connection.execute(text("""CREATE TABLE app_stock_events (
+            id INTEGER PRIMARY KEY, movement_key TEXT, flower TEXT, effective_date DATE, event_type TEXT,
+            change_qty REAL, before_stock REAL, after_stock REAL, reference TEXT, created_at DATETIME)"""))
+        connection.execute(text("CREATE TABLE inventory_snapshot (snapshot_date DATE, flower TEXT, stock REAL)"))
+        connection.execute(text("CREATE TABLE daily_report_cache (report_date DATE, flower TEXT, total_meters REAL)"))
+        connection.execute(text("""CREATE TABLE inventory_log (
+            effect_date DATE, created_at DATETIME, flower TEXT, change_type TEXT, change_qty REAL)"""))
+        connection.execute(text("INSERT INTO app_products VALUES ('3D立体太阳花', 6, 32, 1, 45, 1)"))
+        connection.execute(text("INSERT INTO app_meta VALUES ('legacy_baseline_v1', '2026-10-08T09:00:00')"))
+        connection.execute(text("INSERT INTO inventory_snapshot VALUES ('2026-10-01', '3D立体太阳花', 64)"))
+        connection.execute(text("INSERT INTO app_orders VALUES ('3D立体太阳花', 1, '2026-10-02', 32)"))
+        connection.execute(text("INSERT INTO app_orders VALUES ('其他花型', 1, '2026-09-30', 10)"))
+        connection.execute(text("INSERT INTO daily_report_cache VALUES ('2026-10-02', '3D立体太阳花', 0)"))
+
+    inventory = list_inventory(engine, date(2026, 10, 2))[0]
+    report = report_service.build_inout_report(engine, date(2026, 10, 2), date(2026, 10, 2))
+
+    assert inventory["recent_sales"] == 32
+    assert report["rows"][0]["出库米数"] == 32
+    assert report["details"][0]["change_qty"] == -32

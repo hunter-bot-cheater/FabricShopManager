@@ -1,7 +1,8 @@
 import pytest
 from sqlalchemy import create_engine, inspect, text
 
-from app.core.schema import INDEX_MIGRATIONS, _backfill_legacy_keys, _ensure_table_indexes
+from app.core.schema import (INDEX_MIGRATIONS, _backfill_legacy_keys, _ensure_table_indexes,
+                             _set_default_replenishment_days_once)
 
 
 def test_missing_indexes_are_created_and_migration_is_idempotent():
@@ -52,3 +53,21 @@ def test_old_empty_idempotency_keys_receive_stable_values():
         assert connection.execute(text("SELECT movement_key FROM app_stock_events WHERE id=9")).scalar_one() == first_event_key
         assert first_order_key
         assert first_event_key == "legacy:stock-event:9"
+
+
+def test_existing_replenishment_days_are_reset_to_one_only_once():
+    engine = create_engine("sqlite://")
+    with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE app_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT NOT NULL)"))
+        connection.execute(text("CREATE TABLE app_products (flower TEXT PRIMARY KEY, replenishment_days INTEGER)"))
+        connection.execute(text("INSERT INTO app_products VALUES ('花型A', 4), ('花型B', 2)"))
+
+        _set_default_replenishment_days_once(connection)
+        connection.execute(text("UPDATE app_products SET replenishment_days=3 WHERE flower='花型A'"))
+        _set_default_replenishment_days_once(connection)
+
+        values = dict(connection.execute(text(
+            "SELECT flower, replenishment_days FROM app_products"
+        )).all())
+
+    assert values == {"花型A": 3, "花型B": 1}

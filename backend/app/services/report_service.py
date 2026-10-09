@@ -209,15 +209,29 @@ def _inout_data(engine: Engine, start_date: date, end_date: date) -> dict:
                 "SELECT flower, stock FROM inventory_snapshot WHERE snapshot_date=:day"),
                 {"day": previous}).all()})
             if legacy_end >= start_date:
-                for row in connection.execute(text("""SELECT report_date, flower, total_meters
-                    FROM daily_report_cache WHERE report_date BETWEEN :start AND :end"""),
-                    {"start": start_date, "end": legacy_end}).all():
+                legacy_outflows = []
+                has_imported_legacy_orders = False
+                if "app_orders" in table_names:
+                    has_imported_legacy_orders = connection.execute(text(
+                        "SELECT COUNT(*) FROM app_orders WHERE legacy=1"
+                    )).scalar_one() > 0
+                    legacy_outflows = connection.execute(text("""SELECT inventory_date AS report_date,
+                        flower, SUM(baseline_stock_effect_meters) AS total_meters
+                        FROM app_orders WHERE legacy=1 AND flower IS NOT NULL
+                        AND inventory_date BETWEEN :start AND :end
+                        GROUP BY inventory_date, flower"""),
+                        {"start": start_date, "end": legacy_end}).all()
+                if not has_imported_legacy_orders:
+                    legacy_outflows = connection.execute(text("""SELECT report_date, flower, total_meters
+                        FROM daily_report_cache WHERE report_date BETWEEN :start AND :end"""),
+                        {"start": start_date, "end": legacy_end}).all()
+                for row in legacy_outflows:
                     day, flower, quantity = _report_date(row[0]), row[1], float(row[2] or 0)
                     daily_out[(day, flower)] += quantity
                     if quantity:
                         details.append({"id": None, "flower": flower, "effective_date": day,
                             "event_type": "订单出库", "change_qty": -quantity, "before_stock": None,
-                            "after_stock": None, "reference": "旧系统日报历史出库", "created_at": None})
+                            "after_stock": None, "reference": "旧系统订单基线出库", "created_at": None})
                 for row in connection.execute(text("""SELECT COALESCE(effect_date, DATE(created_at)) AS day,
                     flower, SUM(change_qty) FROM inventory_log
                     WHERE change_type='入库' AND COALESCE(effect_date, DATE(created_at)) BETWEEN :start AND :end

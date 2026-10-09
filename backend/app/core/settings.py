@@ -35,6 +35,7 @@ def defaults() -> dict[str, Any]:
         "default_shipping_fee": 2.5,
         "inventory_sales_window_days": 7,
         "procurement_target_days": 14,
+        "procurement_batch_capacity_meters": 1350,
         "baseline_imported": False,
     }
 
@@ -61,6 +62,9 @@ def save_settings(values: dict[str, Any]) -> dict[str, Any]:
     current["default_shipping_fee"] = max(0.0, float(current["default_shipping_fee"]))
     current["procurement_target_days"] = min(max(1, int(current["procurement_target_days"])), 90)
     current["inventory_sales_window_days"] = min(max(1, int(current["inventory_sales_window_days"])), 90)
+    current["procurement_batch_capacity_meters"] = min(
+        max(1, int(current["procurement_batch_capacity_meters"])), 1_000_000
+    )
     path = settings_path()
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")

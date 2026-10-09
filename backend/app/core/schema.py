@@ -206,7 +206,21 @@ def ensure_schema(engine: Engine) -> None:
         _backfill_legacy_keys(connection)
         for table, indexes in INDEX_MIGRATIONS.items():
             _ensure_table_indexes(connection, table, indexes)
+        _set_default_replenishment_days_once(connection)
         connection.execute(text("UPDATE app_products SET replenishment_days=1 WHERE replenishment_days<1"))
+
+
+def _set_default_replenishment_days_once(connection: Connection) -> None:
+    marker = "replenishment_days_default_1_v1"
+    initialized = connection.execute(text(
+        "SELECT meta_value FROM app_meta WHERE meta_key=:key"
+    ), {"key": marker}).scalar()
+    if initialized is not None:
+        return
+    connection.execute(text("UPDATE app_products SET replenishment_days=1"))
+    connection.execute(text(
+        "INSERT INTO app_meta (meta_key, meta_value) VALUES (:key, 'done')"
+    ), {"key": marker})
 
 
 def _value(row: dict, name: str, default=None):
@@ -233,16 +247,12 @@ def _legacy_products(connection: Connection, tables: set[str]) -> dict[str, dict
     if "inventory" in tables:
         inventory_columns = {column["name"] for column in inspect(connection).get_columns("inventory")}
         fields = ["flower", "current_stock"]
-        if "supplier_lead_time" in inventory_columns:
-            fields.append("supplier_lead_time")
-        sql = "SELECT " + ", ".join(f"`{field}`" for field in fields) + " FROM inventory"
+        sql = "SELECT " + ", ".join(f"`{field}`" for field in fields if field in inventory_columns) + " FROM inventory"
         for row in connection.execute(text(sql)).mappings():
             flower = str(row["flower"] or "").strip()
             if flower:
-                product = products.setdefault(flower, {"cost": 0.0, "stock": 0.0, "lead_days": 1})
+                product = products.setdefault(flower, {"cost": 0.0, "stock": 0.0})
                 product["stock"] = float(row["current_stock"] or 0)
-                if row.get("supplier_lead_time") is not None:
-                    product["lead_days"] = max(1, int(row["supplier_lead_time"]))
     return products
 
 

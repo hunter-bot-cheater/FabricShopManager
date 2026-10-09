@@ -27,6 +27,7 @@ class SettingsInput(BaseModel):
     default_shipping_fee: float | None = Field(default=None, ge=0)
     inventory_sales_window_days: int | None = Field(default=None, ge=1, le=90)
     procurement_target_days: int | None = Field(default=None, ge=1, le=90)
+    procurement_batch_capacity_meters: int | None = Field(default=None, ge=1, le=1_000_000)
 
 
 @router.get("")

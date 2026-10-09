@@ -63,6 +63,7 @@ def test_historical_inventory_uses_matching_sales_window_and_legacy_baseline_sal
     engine = _inventory_listing_engine()
     monkeypatch.setattr("app.services.inventory_service.load_settings", lambda: {
         "inventory_sales_window_days": 7, "procurement_target_days": 14,
+        "procurement_batch_capacity_meters": 1350,
     })
     with engine.begin() as connection:
         connection.execute(text("""INSERT INTO app_stock_events VALUES

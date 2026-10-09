@@ -9,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from app.core.settings import load_settings
-from app.domain.procurement_rules import rank_restock_dates
+from app.domain.procurement_rules import build_purchase_strategy
 
 
 def _as_date(value) -> date:
@@ -303,21 +303,16 @@ def get_recommendations(engine: Engine, today: date | None = None) -> dict:
     items = []
     for product in products:
         recent = max(0.0, recent_meters.get(product["flower"], 0))
-        daily_use = recent / sales_window_days
-        suggestion = rank_restock_dates(
-            today=today, stock=float(product["current_stock"] or 0), daily_use=daily_use,
-            roll_length=float(product["roll_length_meters"] or 0),
-            cost_per_meter=float(product["cost_per_meter"] or 0),
-            lead_days=int(product["replenishment_days"] or 1),
-            target_days=int(settings["procurement_target_days"]),
-            sales_window_days=sales_window_days,
-        )
         items.append({"flower": product["flower"], "current_stock": float(product["current_stock"] or 0),
                       "cost_per_meter": float(product["cost_per_meter"] or 0),
                       "roll_length_meters": float(product["roll_length_meters"] or 0),
-                      "replenishment_days": int(product["replenishment_days"] or 0),
-                      "recent_sales": round(recent, 2), "sales_window_days": sales_window_days, **suggestion})
-    items.sort(key=lambda item: (item.get("days_until_order", 9999), item["flower"]))
-    return {"generated_on": today.isoformat(), "sales_window_days": sales_window_days,
-            "target_coverage_days": int(settings["procurement_target_days"]), "items": items}
+                      "replenishment_days": int(product["replenishment_days"] or 1),
+                      "recent_sales": round(recent, 2)})
+    plan = build_purchase_strategy(
+        today=today, products=items,
+        batch_capacity_meters=float(settings["procurement_batch_capacity_meters"]),
+        target_coverage_days=int(settings["procurement_target_days"]),
+        sales_window_days=sales_window_days,
+    )
+    return {"generated_on": today.isoformat(), **plan}
 
