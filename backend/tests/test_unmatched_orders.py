@@ -22,6 +22,10 @@ def test_unmatched_orders_can_be_paginated_ignored_and_restored(monkeypatch):
     assert first_page["total"] == 3
     assert len(first_page["items"]) == 1
 
+    sorted_first = orders._unmatched_page(False, limit=2, offset=0, sort_by="order_no", sort_order="asc")
+    sorted_second = orders._unmatched_page(False, limit=2, offset=2, sort_by="order_no", sort_order="asc")
+    assert [item["order_no"] for item in sorted_first["items"] + sorted_second["items"]] == ["A-1", "B-1", "C-1"]
+
     assert orders.ignore_unmatched(orders.UnmatchedIds(all=True, exclude_order_ids=[2])) == {"ignored": 2}
     assert orders.unmatched_orders()["total"] == 1
     assert {item["id"] for item in orders.ignored_unmatched_orders()["items"]} == {1, 3}

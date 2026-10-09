@@ -40,18 +40,33 @@ def import_commit(payload: CommitInput) -> dict:
 
 
 @router.get("/unmatched")
-def unmatched_orders(limit: int = 20, offset: int = 0) -> dict:
-    return _unmatched_page(ignored=False, limit=limit, offset=offset)
+def unmatched_orders(limit: int = 20, offset: int = 0, sort_by: str = "updated_at", sort_order: str = "desc") -> dict:
+    return _unmatched_page(ignored=False, limit=limit, offset=offset, sort_by=sort_by, sort_order=sort_order)
 
 
 @router.get("/unmatched/ignored")
-def ignored_unmatched_orders(limit: int = 20, offset: int = 0) -> dict:
-    return _unmatched_page(ignored=True, limit=limit, offset=offset)
+def ignored_unmatched_orders(limit: int = 20, offset: int = 0, sort_by: str = "updated_at", sort_order: str = "desc") -> dict:
+    return _unmatched_page(ignored=True, limit=limit, offset=offset, sort_by=sort_by, sort_order=sort_order)
 
 
-def _unmatched_page(ignored: bool, limit: int, offset: int) -> dict:
+def _unmatched_page(ignored: bool, limit: int, offset: int, sort_by: str = "updated_at", sort_order: str = "desc") -> dict:
     limit = min(max(limit, 1), 100)
     offset = max(offset, 0)
+    sort_columns = {
+        "updated_at": "o.updated_at",
+        "order_no": "o.order_no",
+        "product": "o.product",
+        "product_spec": "o.product_spec",
+        "status": ("o.order_status", "o.after_sale_status"),
+        "order_date": "o.order_date",
+        "merchant_income": "o.merchant_income",
+    }
+    order_direction = "ASC" if sort_order.lower() == "asc" else "DESC"
+    order_columns = sort_columns.get(sort_by, sort_columns["updated_at"])
+    if isinstance(order_columns, tuple):
+        order_by = ", ".join(f"{column} {order_direction}" for column in order_columns)
+    else:
+        order_by = f"{order_columns} {order_direction}"
     match_clause = "EXISTS" if ignored else "NOT EXISTS"
     where = f"""(o.flower IS NULL OR o.meters<=0)
         AND {match_clause} (SELECT 1 FROM app_ignored_unmatched i WHERE i.order_id=o.id)"""
@@ -61,7 +76,7 @@ def _unmatched_page(ignored: bool, limit: int, offset: int) -> dict:
             o.product_quantity, o.meters, o.flower, o.order_status, o.after_sale_status,
             o.order_date, o.order_time, o.merchant_income
             FROM app_orders o WHERE {where}
-            ORDER BY o.updated_at DESC, o.id DESC LIMIT :limit OFFSET :offset"""),
+            ORDER BY {order_by}, o.id DESC LIMIT :limit OFFSET :offset"""),
             {"limit": limit, "offset": offset}).mappings().all()
     return {"items": [dict(row) for row in rows], "total": int(total), "limit": limit, "offset": offset}
 

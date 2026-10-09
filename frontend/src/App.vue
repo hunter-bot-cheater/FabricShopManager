@@ -41,6 +41,10 @@ const eventSearch = ref('')
 const purchaseSearch = ref('')
 const eventSort = reactive({ by: 'created_at', order: 'desc' })
 const purchaseSort = reactive({ by: 'received_date', order: 'desc' })
+const unmatchedSort = reactive({ by: 'updated_at', order: 'desc' })
+const ignoredSort = reactive({ by: 'updated_at', order: 'desc' })
+const reportSort = reactive({ by: '', order: 'asc' })
+const previewSort = reactive({ by: '', order: 'asc' })
 const tablePageSize = 20
 const recommendations = ref({ items: [] })
 const unmatched = ref([])
@@ -106,6 +110,16 @@ const activeProducts = computed(() => products.value.filter(item => item.active)
 const selectedUnmatchedCount = computed(() => allUnmatchedSelected.value
   ? Math.max(0, unmatchedTotal.value - excludedUnmatched.value.length)
   : selectedUnmatched.value.length)
+function previewSortValue(item, key) {
+  if (key === 'order_no') return item.row.order_no || ''
+  if (key === 'product') return `${item.row.product || ''} ${item.row.product_spec || ''}`
+  if (key === 'flower') return item.suggested_flower || ''
+  if (key === 'status') return `${item.row.order_status || ''} ${item.row.after_sale_status || ''}`
+  if (key === 'order_date') return item.order_date || ''
+  if (key === 'meters') return Number(item.meters || 0)
+  if (key === 'stock_action') return Number(item.stock_effect_meters || 0)
+  return item.needs_attention ? '待处理' : item.state
+}
 const orderedPreviewGroups = computed(() => {
   const groups = [
     { key: 'flower', label: '待处理：花型未匹配', rows: [] },
@@ -119,6 +133,14 @@ const orderedPreviewGroups = computed(() => {
         : item.needs_attention ? 'other' : 'ready'
     groups.find(group => group.key === key).rows.push(item)
   }
+  if (previewSort.by) for (const group of groups) group.rows.sort((left, right) => {
+    const a = previewSortValue(left, previewSort.by)
+    const b = previewSortValue(right, previewSort.by)
+    const comparison = typeof a === 'number' && typeof b === 'number'
+      ? a - b
+      : String(a).localeCompare(String(b), 'zh-CN', { numeric: true, sensitivity: 'base' })
+    return previewSort.order === 'asc' ? comparison : -comparison
+  })
   return groups.filter(group => group.rows.length)
 })
 const previewEntries = computed(() => orderedPreviewGroups.value.flatMap(group => [
@@ -130,11 +152,23 @@ const previewEntries = computed(() => orderedPreviewGroups.value.flatMap(group =
     return rows
   }),
 ]))
-const reportEntries = computed(() => visibleReport.value.map((row, index) => ({
+const reportEntries = computed(() => {
+  const rows = [...visibleReport.value]
+  const { by, order } = reportSort
+  if (by) rows.sort((left, right) => {
+    const a = left[by] ?? ''
+    const b = right[by] ?? ''
+    const comparison = typeof a === 'number' && typeof b === 'number'
+      ? a - b
+      : String(a).localeCompare(String(b), 'zh-CN', { numeric: true, sensitivity: 'base' })
+    return order === 'asc' ? comparison : -comparison
+  })
+  return rows.map((row, index) => ({
   key: `report:${index}:${row.日期 || ''}:${row.花型 || ''}:${row.平台 || ''}`,
   row,
   height: 50,
-})))
+  }))
+})
 const editableOrderFields = [
   ['order_no', '订单号', 'text'], ['parent_order_no', '主订单号', 'text'], ['product', '商品名称', 'text'],
   ['product_spec', '商品规格 / 米数', 'text'], ['product_id', '商品编码', 'text'],
@@ -190,9 +224,11 @@ async function loadWorkspace() {
       sort_by: eventSort.by, sort_order: eventSort.order, search: eventSearch.value })
     const purchaseQuery = new URLSearchParams({ limit: tablePageSize, offset: (purchasePage.value - 1) * tablePageSize,
       sort_by: purchaseSort.by, sort_order: purchaseSort.order, search: purchaseSearch.value })
+    const unmatchedQuery = new URLSearchParams({ limit: 20, offset: unmatchedOffset.value,
+      sort_by: unmatchedSort.by, sort_order: unmatchedSort.order })
     const [inventoryRows, productRows, eventRows, unmatchedRows, ignoredCount, purchaseRows, restock] = await Promise.all([
       api(`/inventory?as_of=${stockAsOf.value}`), api('/products'), api(`/inventory/events?${eventQuery}`),
-      api(`/orders/unmatched?limit=20&offset=${unmatchedOffset.value}`),
+      api(`/orders/unmatched?${unmatchedQuery}`),
       api('/orders/unmatched/ignored?limit=1'), api(`/inventory/purchases?${purchaseQuery}`), api('/inventory/recommendations'),
     ])
     dashboard.inventory = inventoryRows
@@ -220,7 +256,8 @@ async function loadPagedTable(kind) {
   await loadWorkspace()
 }
 function sortServerTable(kind, key, header) {
-  const state = kind === 'events' ? eventSort : purchaseSort
+  const state = ({ events: eventSort, purchases: purchaseSort, unmatched: unmatchedSort, ignored: ignoredSort })[kind]
+  if (!state) return
   if (state.by === key) state.order = state.order === 'asc' ? 'desc' : 'asc'
   else { state.by = key; state.order = 'asc' }
   const table = header?.closest('table')
@@ -229,9 +266,10 @@ function sortServerTable(kind, key, header) {
     cell.removeAttribute('data-sort-order')
   })
   if (header) header.dataset.sortOrder = state.order === 'asc' ? '↑' : '↓'
-  if (kind === 'events') eventPage.value = 1
-  else purchasePage.value = 1
-  loadPagedTable(kind)
+  if (kind === 'events') { eventPage.value = 1; loadPagedTable(kind) }
+  else if (kind === 'purchases') { purchasePage.value = 1; loadPagedTable(kind) }
+  else if (kind === 'unmatched') { unmatchedOffset.value = 0; loadUnmatched() }
+  else { ignoredOffset.value = 0; loadIgnored() }
 }
 function gotoTablePage(kind, pageNumber) {
   if (kind === 'events') eventPage.value = pageNumber
@@ -492,9 +530,20 @@ async function exportSelectedReport() {
 function setReportType(type) { reportExportType.value = type }
 async function loadIgnored() {
   try {
-    const result = await api(`/orders/unmatched/ignored?limit=20&offset=${ignoredOffset.value}`)
+    const query = new URLSearchParams({ limit: 20, offset: ignoredOffset.value,
+      sort_by: ignoredSort.by, sort_order: ignoredSort.order })
+    const result = await api(`/orders/unmatched/ignored?${query}`)
     ignored.value = result.items
     ignoredTotal.value = result.total
+  } catch (error) { notify(error.message) }
+}
+async function loadUnmatched() {
+  try {
+    const query = new URLSearchParams({ limit: 20, offset: unmatchedOffset.value,
+      sort_by: unmatchedSort.by, sort_order: unmatchedSort.order })
+    const result = await api(`/orders/unmatched?${query}`)
+    unmatched.value = result.items
+    unmatchedTotal.value = result.total
   } catch (error) { notify(error.message) }
 }
 async function gotoUnmatchedPage(pageNumber) {
@@ -579,6 +628,28 @@ function handleTableSort(event) {
   const header = event.target.closest('th')
   if (!header || header.classList.contains('no-sort')) return
   const table = header.closest('table')
+  if (header.closest('.preview-table') && header.dataset.sortKey) {
+    const key = header.dataset.sortKey
+    if (previewSort.by === key) previewSort.order = previewSort.order === 'asc' ? 'desc' : 'asc'
+    else { previewSort.by = key; previewSort.order = 'asc' }
+    table?.querySelectorAll('thead th').forEach(cell => {
+      cell.classList.toggle('sort-active', cell === header)
+      cell.removeAttribute('data-sort-order')
+    })
+    header.dataset.sortOrder = previewSort.order === 'asc' ? '↑' : '↓'
+    return
+  }
+  if (header.closest('.report-virtual-table') && header.dataset.sortKey) {
+    const key = header.dataset.sortKey
+    if (reportSort.by === key) reportSort.order = reportSort.order === 'asc' ? 'desc' : 'asc'
+    else { reportSort.by = key; reportSort.order = 'asc' }
+    table?.querySelectorAll('thead th').forEach(cell => {
+      cell.classList.toggle('sort-active', cell === header)
+      cell.removeAttribute('data-sort-order')
+    })
+    header.dataset.sortOrder = reportSort.order === 'asc' ? '↑' : '↓'
+    return
+  }
   if (table?.dataset.serverSort && header.dataset.sortKey) {
     sortServerTable(table.dataset.serverSort, header.dataset.sortKey, header)
     return
@@ -734,7 +805,7 @@ onMounted(() => {
           <div class="preview-stats"><div><b>{{ preview.total }}</b><span>订单行</span></div><div><b>{{ preview.counts.new }}</b><span>新增</span></div><div><b>{{ preview.counts.changed }}</b><span>状态变化</span></div><div class="warn-stat"><b>{{ preview.counts.unmatched }}</b><span>待处理</span></div><div><b>{{ preview.counts.refund }}</b><span>退款状态</span></div></div>
           <div v-if="previewDirty" class="preview-edit-warning"><CircleAlert :size="15"/> 订单字段已修改；先重新计算预览，确认米数和库存动作后再导入。</div>
           <VirtualTable class="preview-table" :items="previewEntries" :columns="8" :column-widths="['14%', '22%', '11%', '15%', '10%', '8%', '10%', '10%']" :row-height="64" :max-height="360">
-            <template #header><tr><th>订单号</th><th>商品 / 规格</th><th>花型匹配</th><th>源订单状态</th><th>业务日期</th><th>购买米数</th><th>库存动作</th><th>处理情况</th></tr></template>
+            <template #header><tr><th data-sort-key="order_no">订单号</th><th data-sort-key="product">商品 / 规格</th><th data-sort-key="flower">花型匹配</th><th data-sort-key="status">源订单状态</th><th data-sort-key="order_date">业务日期</th><th data-sort-key="meters">购买米数</th><th data-sort-key="stock_action">库存动作</th><th data-sort-key="handling">处理情况</th></tr></template>
             <template #row="{ item: entry }">
               <tr v-if="entry.kind === 'group'" class="preview-group-heading" :class="{ 'preview-group-ready': entry.group.key === 'ready' }"><td colspan="8"><b>{{ entry.group.label }}</b><span>{{ entry.group.rows.length }} 行</span></td></tr>
               <tr v-else-if="entry.kind === 'order'" class="preview-data-row" :class="{ 'attention-row': entry.item.needs_attention }">
@@ -752,8 +823,8 @@ onMounted(() => {
           <div class="preview-foot"><span><CircleAlert :size="15"/> 花型或规格未识别的行会保留待处理；未成功交易、退款和取消订单仍不计入库存与利润。</span><div><button class="button button-outline" @click="preview = null; previewDirty = false">取消</button><button class="button button-outline" :disabled="loading || !previewDirty" @click="recalculatePreview"><RefreshCw :size="15"/> 重新计算预览</button><button class="button button-primary" :disabled="loading || previewDirty" @click="commitPreview"><Check :size="16"/> 确认导入并更新库存</button></div></div>
         </section>
         <section class="unmatched-toolbar" v-if="unmatchedTotal || ignoredTotal"><div><b>待处理订单</b><span>{{ unmatchedTotal }} 条花型或规格未识别，不影响利润与库存</span></div><button class="compact-button" @click="toggleIgnored">{{ ignoredVisible ? '收起已忽略' : '已忽略 ' + ignoredTotal + ' 条 · 查看记录' }}</button></section>
-        <section class="panel unmatched-table-panel" v-if="unmatchedTotal"><div class="panel-head"><div><h2>待匹配订单</h2><p>过时商品可批量忽略；需要时可在“已忽略”中恢复。</p></div><div class="table-tools"><button class="button button-outline" @click="toggleAllUnmatched">{{ allUnmatchedSelected ? '取消全选所有' : '全选所有' }}</button><button class="button button-outline" @click="rematchUnmatched"><RefreshCw :size="14"/> 重新匹配</button><button class="button button-outline danger-action" :disabled="!selectedUnmatchedCount" @click="ignoreSelected">忽略所选（{{ selectedUnmatchedCount }}）</button></div></div><div class="table-wrap"><table><thead><tr><th class="no-sort"><input type="checkbox" :checked="allUnmatchedSelected ? unmatched.every(item => !excludedUnmatched.includes(item.id)) : unmatched.length > 0 && unmatched.every(item => selectedUnmatched.includes(item.id))" @change="toggleAllUnmatched" aria-label="全选所有待匹配订单" /></th><th>订单号</th><th>商品</th><th>规格</th><th>状态</th><th>业务日期</th><th>金额</th></tr></thead><tbody><tr v-for="item in unmatched" :key="item.id"><td><input type="checkbox" :checked="allUnmatchedSelected ? !excludedUnmatched.includes(item.id) : selectedUnmatched.includes(item.id)" @change="toggleUnmatchedSelection(item.id, $event.target.checked)" :aria-label="'选择订单 ' + item.order_no" /></td><td class="mono">{{ item.order_no }}</td><td>{{ item.product }}</td><td>{{ item.product_spec }}</td><td>{{ item.order_status }} {{ item.after_sale_status }}</td><td>{{ item.order_date || '—' }}</td><td>{{ money(item.merchant_income) }}</td></tr></tbody></table></div><div class="table-pagination"><span>第 {{ unmatchedPage }} / {{ unmatchedPageCount }} 页 · 共 {{ unmatchedTotal }} 条</span><div class="pagination-controls"><button class="button button-outline" :disabled="unmatchedPage <= 1" @click="gotoUnmatchedPage(unmatchedPage - 1)">上一页</button><button v-for="pageNumber in unmatchedPages" :key="pageNumber" class="page-number" :class="{ active: unmatchedPage === pageNumber }" @click="gotoUnmatchedPage(pageNumber)">{{ pageNumber }}</button><select class="page-jump" :value="unmatchedPage" @change="gotoUnmatchedPage(Number($event.target.value))"><option v-for="pageNumber in unmatchedPageCount" :key="pageNumber" :value="pageNumber">第 {{ pageNumber }} 页</option></select><button class="button button-outline" :disabled="unmatchedPage >= unmatchedPageCount" @click="gotoUnmatchedPage(unmatchedPage + 1)">下一页</button></div></div></section>
-        <section class="panel unmatched-table-panel ignored-panel" v-if="ignoredVisible"><div class="panel-head"><div><h2>已忽略订单</h2><p>共 {{ ignoredTotal }} 条。恢复后会重新出现在待匹配列表。</p></div><span class="pill">已忽略 {{ ignoredTotal }} 条</span></div><div class="table-wrap"><table><thead><tr><th>订单号</th><th>商品</th><th>规格</th><th>状态</th><th>业务日期</th><th>金额</th><th class="no-sort">操作</th></tr></thead><tbody><tr v-for="item in ignored" :key="item.id"><td class="mono">{{ item.order_no }}</td><td>{{ item.product }}</td><td>{{ item.product_spec }}</td><td>{{ item.order_status }} {{ item.after_sale_status }}</td><td>{{ item.order_date || '—' }}</td><td>{{ money(item.merchant_income) }}</td><td><button class="table-action restore-action" @click="restoreIgnored(item)">恢复</button></td></tr><tr v-if="!ignored.length"><td colspan="7" class="empty-cell">没有已忽略的订单</td></tr></tbody></table></div><div class="table-pagination"><span>第 {{ ignoredPage }} / {{ ignoredPageCount }} 页 · 共 {{ ignoredTotal }} 条</span><div class="pagination-controls"><button class="button button-outline" :disabled="ignoredPage <= 1" @click="gotoIgnoredPage(ignoredPage - 1)">上一页</button><button v-for="pageNumber in ignoredPages" :key="pageNumber" class="page-number" :class="{ active: ignoredPage === pageNumber }" @click="gotoIgnoredPage(pageNumber)">{{ pageNumber }}</button><button class="button button-outline" :disabled="ignoredPage >= ignoredPageCount" @click="gotoIgnoredPage(ignoredPage + 1)">下一页</button></div></div></section>
+        <section class="panel unmatched-table-panel" v-if="unmatchedTotal"><div class="panel-head"><div><h2>待匹配订单</h2><p>过时商品可批量忽略；需要时可在“已忽略”中恢复。</p></div><div class="table-tools"><button class="button button-outline" @click="toggleAllUnmatched">{{ allUnmatchedSelected ? '取消全选所有' : '全选所有' }}</button><button class="button button-outline" @click="rematchUnmatched"><RefreshCw :size="14"/> 重新匹配</button><button class="button button-outline danger-action" :disabled="!selectedUnmatchedCount" @click="ignoreSelected">忽略所选（{{ selectedUnmatchedCount }}）</button></div></div><div class="table-wrap"><table data-server-sort="unmatched"><thead><tr><th class="no-sort"><input type="checkbox" :checked="allUnmatchedSelected ? unmatched.every(item => !excludedUnmatched.includes(item.id)) : unmatched.length > 0 && unmatched.every(item => selectedUnmatched.includes(item.id))" @change="toggleAllUnmatched" aria-label="全选所有待匹配订单" /></th><th data-sort-key="order_no">订单号</th><th data-sort-key="product">商品</th><th data-sort-key="product_spec">规格</th><th data-sort-key="status">状态</th><th data-sort-key="order_date">业务日期</th><th data-sort-key="merchant_income">金额</th></tr></thead><tbody><tr v-for="item in unmatched" :key="item.id"><td><input type="checkbox" :checked="allUnmatchedSelected ? !excludedUnmatched.includes(item.id) : selectedUnmatched.includes(item.id)" @change="toggleUnmatchedSelection(item.id, $event.target.checked)" :aria-label="'选择订单 ' + item.order_no" /></td><td class="mono">{{ item.order_no }}</td><td>{{ item.product }}</td><td>{{ item.product_spec }}</td><td>{{ item.order_status }} {{ item.after_sale_status }}</td><td>{{ item.order_date || '—' }}</td><td>{{ money(item.merchant_income) }}</td></tr></tbody></table></div><div class="table-pagination"><span>第 {{ unmatchedPage }} / {{ unmatchedPageCount }} 页 · 共 {{ unmatchedTotal }} 条</span><div class="pagination-controls"><button class="button button-outline" :disabled="unmatchedPage <= 1" @click="gotoUnmatchedPage(unmatchedPage - 1)">上一页</button><button v-for="pageNumber in unmatchedPages" :key="pageNumber" class="page-number" :class="{ active: unmatchedPage === pageNumber }" @click="gotoUnmatchedPage(pageNumber)">{{ pageNumber }}</button><select class="page-jump" :value="unmatchedPage" @change="gotoUnmatchedPage(Number($event.target.value))"><option v-for="pageNumber in unmatchedPageCount" :key="pageNumber" :value="pageNumber">第 {{ pageNumber }} 页</option></select><button class="button button-outline" :disabled="unmatchedPage >= unmatchedPageCount" @click="gotoUnmatchedPage(unmatchedPage + 1)">下一页</button></div></div></section>
+        <section class="panel unmatched-table-panel ignored-panel" v-if="ignoredVisible"><div class="panel-head"><div><h2>已忽略订单</h2><p>共 {{ ignoredTotal }} 条。恢复后会重新出现在待匹配列表。</p></div><span class="pill">已忽略 {{ ignoredTotal }} 条</span></div><div class="table-wrap"><table data-server-sort="ignored"><thead><tr><th data-sort-key="order_no">订单号</th><th data-sort-key="product">商品</th><th data-sort-key="product_spec">规格</th><th data-sort-key="status">状态</th><th data-sort-key="order_date">业务日期</th><th data-sort-key="merchant_income">金额</th><th class="no-sort">操作</th></tr></thead><tbody><tr v-for="item in ignored" :key="item.id"><td class="mono">{{ item.order_no }}</td><td>{{ item.product }}</td><td>{{ item.product_spec }}</td><td>{{ item.order_status }} {{ item.after_sale_status }}</td><td>{{ item.order_date || '—' }}</td><td>{{ money(item.merchant_income) }}</td><td><button class="table-action restore-action" @click="restoreIgnored(item)">恢复</button></td></tr><tr v-if="!ignored.length"><td colspan="7" class="empty-cell">没有已忽略的订单</td></tr></tbody></table></div><div class="table-pagination"><span>第 {{ ignoredPage }} / {{ ignoredPageCount }} 页 · 共 {{ ignoredTotal }} 条</span><div class="pagination-controls"><button class="button button-outline" :disabled="ignoredPage <= 1" @click="gotoIgnoredPage(ignoredPage - 1)">上一页</button><button v-for="pageNumber in ignoredPages" :key="pageNumber" class="page-number" :class="{ active: ignoredPage === pageNumber }" @click="gotoIgnoredPage(pageNumber)">{{ pageNumber }}</button><button class="button button-outline" :disabled="ignoredPage >= ignoredPageCount" @click="gotoIgnoredPage(ignoredPage + 1)">下一页</button></div></div></section>
       </div>
 
       <div v-else-if="page === 'inventory'" class="page-content">
@@ -787,7 +858,7 @@ onMounted(() => {
 
         <section v-if="['daily','range'].includes(reportExportType)" class="panel data-panel report-table"><div class="panel-head"><div><h2>{{ reportExportType === 'daily' ? '日报经营汇总' : '区间经营汇总' }}</h2><p>{{ reportExportType === 'daily' ? reportRange.start : `${reportRange.start} 至 ${reportRange.end}` }} · 退款、关闭订单不计入</p></div><span class="pill positive"><CircleCheck :size="14"/> 数据已同步</span></div>
           <VirtualTable class="report-virtual-table" :items="reportEntries" :columns="9" :column-widths="['10%', '18%', '11%', '9%', '8%', '11%', '11%', '9%', '13%']" :row-height="50" :max-height="'min(65vh, 640px)'">
-            <template #header><tr><th>日期</th><th>花型</th><th>平台</th><th>订单行数</th><th>米数</th><th>营业额</th><th>面料成本</th><th>运费</th><th class="align-right">净利润</th></tr></template>
+            <template #header><tr><th data-sort-key="日期">日期</th><th data-sort-key="花型">花型</th><th data-sort-key="平台">平台</th><th data-sort-key="订单行数">订单行数</th><th data-sort-key="米数">米数</th><th data-sort-key="营业额">营业额</th><th data-sort-key="成本">面料成本</th><th data-sort-key="运费">运费</th><th class="align-right" data-sort-key="利润">净利润</th></tr></template>
             <template #row="{ item }"><tr><td>{{ item.row.日期 }}</td><td><b>{{ item.row.花型 }}</b></td><td><span class="platform-tag">{{ item.row.平台 }}</span></td><td>{{ item.row.订单行数 }}</td><td>{{ number(item.row.米数) }} m</td><td>{{ money(item.row.营业额) }}</td><td>{{ money(item.row.成本) }}</td><td>{{ money(item.row.运费) }}</td><td class="align-right"><b class="profit-amount">{{ money(item.row.利润) }}</b></td></tr></template>
             <template #empty><tr v-if="!filteredReport.length"><td colspan="9" class="empty-cell">该日期范围暂无符合统计口径的订单</td></tr></template>
             <template #footer><tr v-if="filteredReport.length"><td colspan="3"><b>合计</b></td><td>{{ reportVisibleTotals.订单行数 }}</td><td>{{ number(reportVisibleTotals.米数) }} m</td><td>{{ money(reportVisibleTotals.营业额) }}</td><td>{{ money(reportVisibleTotals.成本) }}</td><td>{{ money(reportVisibleTotals.运费) }}</td><td class="align-right"><b class="profit-amount">{{ money(reportVisibleTotals.利润) }}</b></td></tr></template>
