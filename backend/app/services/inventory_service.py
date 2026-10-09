@@ -88,18 +88,27 @@ def list_inventory(engine: Engine, as_of: date | None = None) -> list[dict]:
     as_of = as_of or date.today()
     settings = load_settings()
     days = int(settings["inventory_sales_window_days"])
-    start = date.today() - timedelta(days=days - 1)
+    start = as_of - timedelta(days=days - 1)
     with engine.connect() as connection:
         rows = connection.execute(text("""SELECT p.flower, p.cost_per_meter, p.current_stock, p.active,
             p.roll_length_meters, p.replenishment_days,
-            COALESCE(SUM(CASE WHEN e.effective_date BETWEEN :start AND :today
+            COALESCE(SUM(CASE WHEN e.effective_date BETWEEN :start AND :as_of
                 AND e.event_type IN ('订单出库','退款回补') THEN -e.change_qty ELSE 0 END), 0) AS recent_sales
             FROM app_products p LEFT JOIN app_stock_events e ON e.flower=p.flower
             WHERE p.active=1 GROUP BY p.flower, p.cost_per_meter, p.current_stock, p.active,
             p.roll_length_meters, p.replenishment_days ORDER BY p.flower"""),
-            {"start": start, "today": date.today()}).mappings().all()
+            {"start": start, "as_of": as_of}).mappings().all()
+        legacy_sales = connection.execute(text("""SELECT flower,
+            SUM(baseline_stock_effect_meters) AS recent_sales FROM app_orders
+            WHERE legacy=1 AND inventory_date BETWEEN :start AND :as_of GROUP BY flower"""),
+            {"start": start, "as_of": as_of}).mappings().all()
         all_events = connection.execute(text("""SELECT id, flower, effective_date, event_type,
             change_qty, after_stock FROM app_stock_events ORDER BY effective_date, id""")).mappings().all()
+    recent_sales_by_flower = {row["flower"]: float(row["recent_sales"] or 0) for row in rows}
+    for source in legacy_sales:
+        recent_sales_by_flower[source["flower"]] = (
+            recent_sales_by_flower.get(source["flower"], 0) + float(source["recent_sales"] or 0)
+        )
     events_by_flower: dict[str, list[dict]] = {}
     for event in all_events:
         events_by_flower.setdefault(event["flower"], []).append(dict(event))
@@ -109,12 +118,13 @@ def list_inventory(engine: Engine, as_of: date | None = None) -> list[dict]:
         flower_events = events_by_flower.get(row["flower"], [])
         state = _stock_at_date(_stock_baseline(float(row["current_stock"] or 0), flower_events),
                                flower_events, as_of)
-        row["current_stock"] = state["theoretical"]
+        row["current_stock"] = state["stock"]
         row["counted_stock"] = state["counted"]
         row["theoretical_stock"] = state["theoretical"]
         row["inventory_difference"] = (round(state["theoretical"] - state["counted"], 2)
                                        if state["counted"] is not None else None)
         row["as_of_date"] = as_of.isoformat()
+        row["recent_sales"] = round(max(0.0, recent_sales_by_flower.get(row["flower"], 0.0)), 2)
         row["reorder_level"] = round(float(row["recent_sales"] or 0) / days * (int(row["replenishment_days"] or 1) + 1), 2)
         row["low_stock"] = float(row["current_stock"] or 0) < row["reorder_level"]
         result.append(row)
