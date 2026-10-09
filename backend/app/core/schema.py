@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 import pandas as pd
-from sqlalchemy import inspect, text
+from sqlalchemy import Index, MetaData, Table, inspect, text
 from sqlalchemy.engine import Connection, Engine
 
 from app.domain.order_rules import is_cancelled, is_refunded, is_shipped, line_key, match_flower, order_dates
@@ -122,6 +122,76 @@ MIGRATIONS = {
                            "created_at": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
 }
 
+INDEX_MIGRATIONS = {
+    "app_products": (("uq_app_product_flower", True, ("flower",)),),
+    "app_orders": (
+        ("uq_app_order_line", True, ("platform", "order_no", "line_key")),
+        ("idx_app_order_date", False, ("order_date",)),
+        ("idx_app_order_flower", False, ("flower",)),
+    ),
+    "app_stock_events": (
+        ("uq_app_stock_movement", True, ("movement_key",)),
+        ("idx_app_stock_date", False, ("effective_date",)),
+        ("idx_app_stock_flower", False, ("flower", "effective_date")),
+    ),
+    "app_purchase_receipts": (
+        ("idx_app_purchase_date", False, ("received_date",)),
+        ("idx_app_purchase_flower", False, ("flower", "received_date")),
+    ),
+    "app_ignored_unmatched": (("uq_app_ignored_order", True, ("order_id",)),),
+    "app_flower_aliases": (
+        ("uq_app_alias_name", True, ("alias_name",)),
+        ("idx_app_alias_flower", False, ("flower",)),
+    ),
+}
+
+
+def _backfill_legacy_keys(connection: Connection) -> None:
+    orders = connection.execute(text("""SELECT id, merchant_code_spec, product_id, product_spec, product
+        FROM app_orders WHERE line_key IS NULL OR line_key=''""")).mappings().all()
+    for row in orders:
+        connection.execute(text("UPDATE app_orders SET line_key=:key WHERE id=:id"),
+                           {"key": line_key(dict(row)), "id": row["id"]})
+
+    events = connection.execute(text("""SELECT id FROM app_stock_events
+        WHERE movement_key IS NULL OR movement_key=''""")).scalars().all()
+    for event_id in events:
+        connection.execute(text("UPDATE app_stock_events SET movement_key=:key WHERE id=:id"),
+                           {"key": f"legacy:stock-event:{event_id}", "id": event_id})
+
+
+def _ensure_table_indexes(connection: Connection, table_name: str, definitions: tuple) -> None:
+    inspector = inspect(connection)
+    actual = []
+    for index in inspector.get_indexes(table_name):
+        actual.append((tuple(index["column_names"]), bool(index["unique"]), index["name"]))
+    for constraint in inspector.get_unique_constraints(table_name):
+        actual.append((tuple(constraint["column_names"]), True, constraint["name"]))
+    primary_key = inspector.get_pk_constraint(table_name)
+    if primary_key.get("constrained_columns"):
+        actual.append((tuple(primary_key["constrained_columns"]), True, primary_key.get("name") or "PRIMARY"))
+
+    table = Table(table_name, MetaData(), autoload_with=connection)
+    for name, unique, columns in definitions:
+        matching = next((entry for entry in actual
+                         if entry[0] == columns and (entry[1] or not unique)), None)
+        if matching:
+            continue
+        name_conflict = next((entry for entry in actual if entry[2] == name), None)
+        if name_conflict:
+            raise RuntimeError(f"数据库表 {table_name} 中索引 {name} 的字段与程序要求不一致。")
+        if unique:
+            column_sql = ", ".join(f"`{column}`" for column in columns)
+            duplicate = connection.execute(text(
+                f"SELECT {column_sql}, COUNT(*) AS duplicate_count FROM `{table_name}` "
+                f"GROUP BY {column_sql} HAVING COUNT(*)>1 LIMIT 1"
+            )).mappings().first()
+            if duplicate:
+                key = ", ".join(f"{column}={duplicate[column]!r}" for column in columns)
+                raise RuntimeError(f"数据库表 {table_name} 存在重复键（{key}），无法安全补建唯一索引 {name}。")
+        Index(name, *(table.c[column] for column in columns), unique=unique).create(connection, checkfirst=True)
+        actual.append((columns, unique, name))
+
 
 def ensure_schema(engine: Engine) -> None:
     with engine.begin() as connection:
@@ -133,6 +203,9 @@ def ensure_schema(engine: Engine) -> None:
             for name, definition in columns.items():
                 if name not in present:
                     connection.execute(text(f"ALTER TABLE `{table}` ADD COLUMN `{name}` {definition}"))
+        _backfill_legacy_keys(connection)
+        for table, indexes in INDEX_MIGRATIONS.items():
+            _ensure_table_indexes(connection, table, indexes)
         connection.execute(text("UPDATE app_products SET replenishment_days=1 WHERE replenishment_days<1"))
 
 
