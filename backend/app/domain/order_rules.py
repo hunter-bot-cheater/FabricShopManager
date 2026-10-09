@@ -102,8 +102,9 @@ def extract_meter(spec: Any) -> float:
         return 0.0
 
     # Platform exports place the selected length on different sides of their
-    # comma/semicolon. Search the SKU text, excluding parenthetical notes.
-    selection = re.sub(r"[（(][^）)]*[）)]", "", value).strip()
+    # comma/semicolon. Keep parenthetical text because some Taobao SKUs put the
+    # selected length there; remove explicit fabric-width annotations below.
+    selection = value
     width_value = r"(?:\d+(?:\.\d+)?|[一二两三四五六七八九]?十[一二两三四五六七八九]?|[一二两三四五六七八九]|半)"
     selection = re.sub(
         rf"(?:门幅|幅宽|宽幅|布宽|宽度)\s*{width_value}\s*(?:米|m)(?![a-z])|"
