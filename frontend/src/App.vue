@@ -4,6 +4,7 @@ import DatePicker from './DatePicker.vue'
 import FlowerSelect from './FlowerSelect.vue'
 import VirtualTable from './VirtualTable.vue'
 import { recentDateRange } from './dateRange.js'
+import { dailyOverviewRows } from './overviewReport.js'
 import {
   Activity, ArrowRight, ArrowUpRight, Boxes, CalendarDays,
   Check, CircleAlert, CircleCheck, CloudUpload,
@@ -30,7 +31,7 @@ const now = new Date()
 const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
 const startOfMonth = `${today.slice(0, 7)}-01`
 const reportRange = reactive({ start: today, end: today, group: 'day' })
-const dashboard = reactive({ report: null, weekReport: null, inventory: [], unmatched: [] })
+const dashboard = reactive({ weekReport: null, inventory: [], unmatched: [] })
 const products = ref([])
 const events = ref([])
 const purchases = ref([])
@@ -86,6 +87,9 @@ const excludedUnmatched = ref([])
 const pageTitle = computed(() => menus.find(item => item.id === page.value)?.label || '经营总览')
 const currentTimeLabel = computed(() => new Intl.DateTimeFormat('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' }).format(now))
 const overviewDateRange = computed(() => recentDateRange(7, now))
+const overviewDailyRows = computed(() => dailyOverviewRows(
+  dashboard.weekReport?.rows || [], overviewDateRange.value.start, overviewDateRange.value.end,
+))
 const filteredInventory = computed(() => dashboard.inventory.filter(item => !searchText.value || item.flower.includes(searchText.value)))
 const filteredProducts = computed(() => products.value.filter(item => !searchText.value || item.flower.includes(searchText.value)))
 const filteredReport = computed(() => {
@@ -243,7 +247,7 @@ async function loadWorkspace() {
     purchases.value = purchaseRows.items
     purchaseTotal.value = purchaseRows.total
     recommendations.value = restock
-    await Promise.all([loadReport(), loadOverviewReport()])
+    await loadOverviewReport()
   } catch (error) { notify(error.message) }
   finally { loading.value = false }
 }
@@ -292,7 +296,6 @@ async function loadReport() {
     refundReport.value = refunds
     inoutReport.value = inout
   } catch (error) { notify(error.message); return }
-  if (page.value === 'overview') dashboard.report = report.value
 }
 async function loadOverviewReport() {
   const { start, end } = overviewDateRange.value
@@ -774,15 +777,15 @@ onMounted(() => {
         <div class="page-heading"><div><div class="eyebrow">OVERVIEW <span class="eyebrow-dot"></span> {{ currentTimeLabel }}</div><h1>经营总览</h1><p>今日营业额、近 7 天利润与库存，一眼掌握。</p></div></div>
         <template v-if="system.initialized">
           <div class="metric-grid">
-            <article class="metric-card"><div class="metric-top"><span>今日营业额</span><div class="metric-icon coral"><Wallet :size="18"/></div></div><div class="metric-value">{{ money(dashboard.report?.totals?.营业额) }}</div><div class="metric-foot"><span class="metric-muted">已匹配有效订单</span><span class="metric-link" @click="selectMenu('reports')">查看日报 <ArrowUpRight :size="13"/></span></div></article>
+            <article class="metric-card"><div class="metric-top"><span>近 7 天营业额</span><div class="metric-icon coral"><Wallet :size="18"/></div></div><div class="metric-value">{{ money(dashboard.weekReport?.totals?.营业额) }}</div><div class="metric-foot"><span class="metric-muted">{{ overviewDateRange.start }} 至 {{ overviewDateRange.end }}</span><span class="metric-link" @click="selectMenu('reports')">查看报表 <ArrowUpRight :size="13"/></span></div></article>
             <article class="metric-card"><div class="metric-top"><span>近 7 天利润</span><div class="metric-icon green"><TrendingUp :size="18"/></div></div><div class="metric-value green-text">{{ money(dashboard.weekReport?.totals?.利润) }}</div><div class="metric-foot"><span class="metric-muted">{{ overviewDateRange.start }} 至 {{ overviewDateRange.end }}</span><span class="pill positive"><ArrowUpRight :size="13"/> 实时计算</span></div></article>
             <article class="metric-card"><div class="metric-top"><span>在售花型</span><div class="metric-icon purple"><Flower2 :size="18"/></div></div><div class="metric-value">{{ products.filter(item => item.active).length }}<small> 种</small></div><div class="metric-foot"><span class="metric-muted">商品成本档案</span><span class="metric-link" @click="selectMenu('products')">管理商品 <ArrowUpRight :size="13"/></span></div></article>
             <article class="metric-card clickable-metric" role="button" tabindex="0" @click="selectMenu('orders')" @keydown.enter="selectMenu('orders')"><div class="metric-top"><span>待处理匹配</span><div class="metric-icon amber"><CircleAlert :size="18"/></div></div><div class="metric-value">{{ unmatchedTotal }}<small> 行</small></div><div class="metric-foot"><span class="metric-muted">不计入库存和日报</span><span class="metric-link">{{ unmatchedTotal ? '前往处理' : '全部已匹配' }} <ArrowUpRight :size="13"/></span></div></article>
           </div>
           <div class="content-grid overview-grid">
-            <section class="panel panel-large"><div class="panel-head"><div><h2>近 7 天利润明细</h2><p>{{ overviewDateRange.start }} 至 {{ overviewDateRange.end }} · 按订单业务日期汇总</p></div><button class="text-button" @click="selectMenu('reports')">完整报表 <ArrowRight :size="14"/></button></div>
-              <div v-if="dashboard.weekReport?.rows?.length" class="table-wrap"><table><thead><tr><th>日期</th><th>花型</th><th>平台</th><th>订单行</th><th>米数</th><th>营业额</th><th>成本</th><th>运费</th><th class="align-right">利润</th></tr></thead><tbody><tr v-for="(row, i) in dashboard.weekReport.rows.slice(0, 7)" :key="i"><td>{{ row.日期 }}</td><td><b>{{ row.花型 }}</b></td><td><span class="platform-tag">{{ row.平台 }}</span></td><td>{{ row.订单行数 }}</td><td>{{ number(row.米数) }} m</td><td>{{ money(row.营业额) }}</td><td>{{ money(row.成本) }}</td><td>{{ money(row.运费) }}</td><td class="align-right"><b class="profit-amount">{{ money(row.利润) }}</b></td></tr></tbody></table></div>
-              <div v-else class="empty-state"><div class="empty-icon"><ShoppingBag :size="22"/></div><b>近 7 天还没有可统计的订单</b><span>导入平台订单后，这里会自动更新利润汇总。</span><button class="text-button" @click="selectMenu('orders')">开始导入 <ArrowRight :size="14"/></button></div>
+            <section class="panel panel-large"><div class="panel-head"><div><h2>近 7 天每日经营汇总</h2><p>{{ overviewDateRange.start }} 至 {{ overviewDateRange.end }} · 每天的营业额和利润</p></div><button class="text-button" @click="selectMenu('reports')">完整报表 <ArrowRight :size="14"/></button></div>
+              <div v-if="dashboard.weekReport" class="table-wrap"><table><thead><tr><th>日期</th><th>有效订单行</th><th>营业额</th><th class="align-right">利润</th></tr></thead><tbody><tr v-for="row in overviewDailyRows" :key="row.日期"><td>{{ row.日期 }}</td><td>{{ row.订单行数 }}</td><td>{{ money(row.营业额) }}</td><td class="align-right"><b class="profit-amount">{{ money(row.利润) }}</b></td></tr></tbody><tfoot><tr><td><b>近 7 天合计</b></td><td>{{ dashboard.weekReport.totals?.订单行数 || 0 }}</td><td><b>{{ money(dashboard.weekReport.totals?.营业额) }}</b></td><td class="align-right"><b class="profit-amount">{{ money(dashboard.weekReport.totals?.利润) }}</b></td></tr></tfoot></table></div>
+              <div v-else class="empty-state"><div class="empty-icon"><ShoppingBag :size="22"/></div><b>暂时无法获取近 7 天经营数据</b><span>检查数据库连接后刷新页面。</span></div>
             </section>
             <section class="panel inventory-peek"><div class="panel-head"><div><h2>库存概况</h2><p>当前可用库存 · 单位：米</p></div><button class="icon-button small" @click="selectMenu('inventory')"><ArrowUpRight :size="15"/></button></div>
               <div v-if="dashboard.inventory.length" class="stock-peek-list"><div v-for="item in dashboard.inventory" :key="item.flower" class="stock-peek-row"><div class="flower-dot">{{ item.flower.slice(0, 1) }}</div><div class="stock-name"><b>{{ item.flower }}</b><span>成本 {{ money(item.cost_per_meter) }}/米</span></div><div class="stock-value" :class="{ 'low-stock': item.low_stock }"><b>{{ number(item.current_stock) }}</b><small>米</small></div></div></div>
