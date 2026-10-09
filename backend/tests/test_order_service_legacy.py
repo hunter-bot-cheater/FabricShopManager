@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, event, text
 
 from app.domain.order_rules import line_key
 from app.services import order_service
-from app.services.order_service import commit_import, prepare_import
+from app.services.order_service import commit_import, prepare_import, rematch_unmatched
 
 
 def _engine():
@@ -201,3 +201,36 @@ def test_unknown_source_spec_clears_stale_legacy_meters_without_changing_baselin
     assert order == (None, 0, 0)
     assert stock == 100
     assert movement_count == 0
+
+
+def test_rematching_legacy_unmatched_order_updates_baseline_without_deducting_stock():
+    engine = _engine()
+    key = line_key({"product_id": "SKU-OLD", "product_spec": "城市条纹;一米"})
+    with engine.begin() as connection:
+        connection.execute(text("""INSERT INTO app_stock_events
+            (movement_key, flower, effective_date, event_type, change_qty,
+             before_stock, after_stock, reference)
+            VALUES ('baseline:城市条纹', '城市条纹', '2026-10-08', '期初库存', 100, 0, 100, 'baseline')"""))
+        connection.execute(text("""INSERT INTO app_orders (
+            platform, order_no, line_key, product, product_spec, product_id,
+            merchant_code_spec, order_status, after_sale_status, product_quantity,
+            flower, meters, stock_effect_meters, baseline_stock_effect_meters,
+            order_date, inventory_date, refunded, cancelled, legacy, version)
+            VALUES (0, '260723-OLD', :line_key, '城市条纹', '城市条纹;一米', 'SKU-OLD',
+            '', '已发货', '', 2, NULL, 0, 0, 0, '2026-07-23', '2026-07-23', 0, 0, 1, 1)"""),
+            {"line_key": key})
+
+    result = rematch_unmatched(engine)
+
+    with engine.connect() as connection:
+        order = connection.execute(text("""SELECT flower, meters, stock_effect_meters,
+            baseline_stock_effect_meters, legacy FROM app_orders""")).one()
+        stock = connection.execute(text(
+            "SELECT current_stock FROM app_products WHERE flower='城市条纹'"
+        )).scalar_one()
+        event_count = connection.execute(text("SELECT COUNT(*) FROM app_stock_events")).scalar_one()
+    assert result["matched"] == 1
+    assert result["stock_movements"] == 0
+    assert order == ("城市条纹", 2, 2, 2, 1)
+    assert stock == 100
+    assert event_count == 1

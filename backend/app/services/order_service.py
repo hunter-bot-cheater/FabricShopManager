@@ -519,15 +519,19 @@ def rematch_unmatched(engine: Engine) -> dict:
                 continue
             effect = meters if (is_shipped(row) and not is_refunded(row) and not is_cancelled(row)) else 0.0
             _, inventory_date = order_dates(row, int(row.get("platform") or 0))
+            legacy = bool(row.get("legacy"))
+            baseline_effect = effect if legacy else float(row.get("baseline_stock_effect_meters") or 0)
             connection.execute(text("""UPDATE app_orders SET flower=:flower, meters=:meters,
-                stock_effect_meters=:effect, inventory_date=:inventory_date, version=version+1
+                stock_effect_meters=:effect, baseline_stock_effect_meters=:baseline_effect,
+                inventory_date=:inventory_date, version=version+1
                 WHERE id=:id"""), {"flower": flower, "meters": meters, "effect": effect,
-                "inventory_date": inventory_date, "id": row["id"]})
+                "baseline_effect": baseline_effect, "inventory_date": inventory_date, "id": row["id"]})
             connection.execute(text("DELETE FROM app_ignored_unmatched WHERE order_id=:id"),
                                {"id": row["id"]})
-            for changed_flower, delta in stock_changes(
+            deltas = {} if legacy else stock_changes(
                 row.get("flower"), float(row.get("stock_effect_meters") or 0), flower, effect
-            ).items():
+            )
+            for changed_flower, delta in deltas.items():
                 _apply_stock_change(connection, changed_flower, delta,
                                     inventory_date or date.today(), "订单出库",
                                     f"order:{row['id']}:v{int(row.get('version') or 1) + 1}:{changed_flower}",
